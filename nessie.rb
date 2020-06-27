@@ -1,65 +1,75 @@
 require "socket"
-require "bindata"
+require "net/dns"
 
-class DNSQuery < BinData::Record
-  endian :big
-  uint16 :transaction_id
-  uint16 :flags
-  uint16 :questions
-  uint16 :answer_rrs
-  uint16 :authority_rrs
-  uint16 :additional_rrs
-  stringz :name
-  uint16 :query_type
-  uint16 :query_class
-end
+def resolve(name)
+  t = "199.7.83.42" # l.root-servers.net, operated by ICANN
+  10.times do
+    q = Net::DNS::Packet.new(name)
+    s = UDPSocket.new
+    s.connect(t, 53)
+    s.send(q.data, 0)
+    a_data = s.recvfrom(999)
+    a = Net::DNS::Packet::parse(a_data)
+    p a
 
-class DNSResponse < BinData::Record
-  endian :big
-  uint16 :transaction_id
-  uint16 :flags
-  uint16 :questions
-  uint16 :answer_rrs
-  uint16 :authority_rrs
-  uint16 :additional_rrs
-
-  stringz :name
-  uint16 :query_type
-  uint16 :query_class
-
-  stringz :response_name
-  uint16 :response_type
-  uint16 :response_class
-  uint32 :ttl
-  uint16 :resp_len
-  uint32 :addr
+    if a.answer.size > 0
+      rr = a.answer.find { |rr| rr.type == "A" }
+      if rr
+        t = rr.address
+        return t.to_s if rr.name == name
+      else
+        rr = a.answer.find { |rr| rr.type == "CNAME" }
+        if rr
+          n = rr.cname
+          t = resolve(n)
+          return t
+        else
+          raise "oh no"
+        end
+      end
+    elsif a.additional.size > 0
+      t = a.additional.find { |rr| rr.type == "A" }.address
+    elsif a.authority.size > 0
+      rr = a.authority.find { |rr| rr.type == "NS" }
+      if rr
+        n = rr.nsdname
+        t = resolve(n)
+      else
+        rr = a.authority.find { |rr| rr.type == "SOA" }
+        if rr
+          n = rr.mname
+          t = resolve(n)
+        else
+          raise "oh no"
+        end
+      end
+    end
+    t = t.to_s
+    p t
+  end
+  t
 end
 
 socket = UDPSocket.new
-socket.bind("127.0.0.1", 53)
+socket.bind("127.0.0.1", 5353)
 
 loop do
-  query, sender_inet_addr = socket.recvfrom(999)
+  data, sender_inet_addr = socket.recvfrom(999)
   type, port, domain, ip = sender_inet_addr
 
-  q = DNSQuery.read(query)
-  p q
+  query = Net::DNS::Packet::parse(data)
 
-  r = DNSResponse.read(query)
+  p query
+  name = query.question[0].qName
 
-  r.transaction_id = q.transaction_id
-  r.flags = 0x8180
-  r.answer_rrs = 1
-  r.additional_rrs = 0
+  addr = resolve(name)
 
-  r.response_name = q.name
-  r.response_type = 1
-  r.response_class = 1
-  r.ttl = 86400
-  r.resp_len = 4
-  # Convert IP address to uint32.
-  r.addr = [185, 207, 107, 49].pack("C*").unpack("N")[0]
-  p r
+  response = Net::DNS::Packet.new(name)
+  response.header.id = query.header.id
+  response.header.qr = 1
+  response.header.ra = 1
+  response.question = query.question
+  response.answer = [Net::DNS::RR.new(name: name, ttl: 86400, cls: "IN", type: "A", address: addr)]
 
-  socket.send(r.to_binary_s, 0, ip, port)
+  socket.send(response.data, 0, ip, port)
 end
