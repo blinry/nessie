@@ -9,35 +9,29 @@ class Question < BinData::Record
   uint16 :query_class
 end
 
-class DNSQuery < BinData::Record
+class RR < BinData::Record
   endian :big
-  uint16 :transaction_id
-  uint16 :flags
-  uint16 :num_questions
-  uint16 :answer_rrs
-  uint16 :authority_rrs
-  uint16 :additional_rrs
-
-  array :questions, type: :question, initial_length: :num_questions
-end
-
-class DNSResponse < BinData::Record
-  endian :big
-  uint16 :transaction_id
-  uint16 :flags
-  uint16 :num_questions
-  uint16 :answer_rrs
-  uint16 :authority_rrs
-  uint16 :additional_rrs
-
-  array :questions, type: :question, initial_length: :num_questions
-
-  stringz :response_name
-  uint16 :response_type
-  uint16 :response_class
+  stringz :name
+  uint16 :rr_type
+  uint16 :rr_class
   uint32 :ttl
   uint16 :resp_len
   uint32 :addr
+end
+
+class DNSPacket < BinData::Record
+  endian :big
+  uint16 :transaction_id
+  uint16 :flags
+  uint16 :num_questions
+  uint16 :num_answers
+  uint16 :num_authorities
+  uint16 :num_additionals
+
+  array :questions, type: :question, initial_length: :num_questions
+  array :answers, type: :rr, initial_length: :num_answers
+  array :authorities, type: :rr, initial_length: :num_authorities
+  array :additionals, type: :rr, initial_length: :num_additionals
 end
 
 def resolve(name)
@@ -106,24 +100,28 @@ loop do
   data, sender_inet_addr = socket.recvfrom(999)
   type, port, domain, ip = sender_inet_addr
 
-  query = DNSQuery.read(data)
+  query = DNSPacket.read(data)
   p query
   name = name_to_s(query.questions[0].name)
 
   addr = resolve(name)
 
-  response = DNSResponse.new()
+  response = DNSPacket.new()
+  response.flags = 0x8180
   response.transaction_id = query.transaction_id
-  response.response_type = 1
-  response.response_class = 1
-  response.ttl = 86400
-  response.resp_len = 4
   response.num_questions = 1
-  response.answer_rrs = 1
+  response.num_answers = 1
   response.questions = query.questions
-  response.response_name = query.questions[0].name
+
+  answer = RR.new()
+  answer.name = query.questions[0].name
+  answer.rr_type = 1
+  answer.rr_class = 1
+  answer.ttl = 86400
+  answer.resp_len = 4
   # Convert IP address to uint32.
-  response.addr = addr.split(".").map(&:to_i).pack("C*").unpack("N")[0]
+  answer.addr = addr.split(".").map(&:to_i).pack("C*").unpack("N")[0]
+  response.answers = [answer]
 
   socket.send(response.to_binary_s, 0, ip, port)
 end
