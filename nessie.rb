@@ -37,11 +37,22 @@ end
 def resolve(name)
   t = "199.7.83.42" # l.root-servers.net, operated by ICANN
   10.times do
-    q = Net::DNS::Packet.new(name)
+    q = DNSPacket.new()
+    q.transaction_id = rand(2 ** 16)
+    q.flags = 0x0120 # standard query
+    q.num_questions = 1
+    question = Question.new()
+    question.name = name
+    question.query_type = 1
+    question.query_class = 1
+    q.questions = [question]
+
     s = UDPSocket.new
     s.connect(t, 53)
-    s.send(q.data, 0)
-    a_data = s.recvfrom(999)
+    s.send(q.to_binary_s, 0)
+    p "Querying #{t} for #{name_to_s(name)}"
+    STDOUT.flush
+    a_data = s.recvfrom(9999)
     a = Net::DNS::Packet::parse(a_data)
     p a
 
@@ -49,12 +60,12 @@ def resolve(name)
       rr = a.answer.find { |rr| rr.type == "A" }
       if rr
         t = rr.address
-        return t.to_s if rr.name == name
+        return t.to_s if rr.name == name_to_s(name) + "."
       else
         rr = a.answer.find { |rr| rr.type == "CNAME" }
         if rr
           n = rr.cname
-          t = resolve(n)
+          t = resolve(s_to_name(n))
           return t
         else
           raise "oh no"
@@ -66,12 +77,12 @@ def resolve(name)
       rr = a.authority.find { |rr| rr.type == "NS" }
       if rr
         n = rr.nsdname
-        t = resolve(n)
+        t = resolve(s_to_name(n))
       else
         rr = a.authority.find { |rr| rr.type == "SOA" }
         if rr
           n = rr.mname
-          t = resolve(n)
+          t = resolve(s_to_name(n))
         else
           raise "oh no"
         end
@@ -91,18 +102,25 @@ def name_to_s(name)
   fields = []
   while b.size > 0
     l = b.shift
-    fields << b.shift(l)
+    fields << b.shift(l).map(&:chr).join()
   end
   fields.join(".")
 end
 
+def s_to_name(name)
+  name.split(".").map { |f|
+    f.size.chr + f
+  }.join()
+end
+
 loop do
-  data, sender_inet_addr = socket.recvfrom(999)
+  data, sender_inet_addr = socket.recvfrom(9999)
   type, port, domain, ip = sender_inet_addr
 
   query = DNSPacket.read(data)
   p query
-  name = name_to_s(query.questions[0].name)
+  #name = name_to_s(query.questions[0].name)
+  name = query.questions[0].name
 
   addr = resolve(name)
 
