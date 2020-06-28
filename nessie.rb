@@ -2,6 +2,11 @@ require "socket"
 require "net/dns"
 require "bindata"
 
+A = 1
+NS = 2
+CNAME = 5
+SOA = 6
+
 class Question < BinData::Record
   endian :big
   stringz :name
@@ -16,7 +21,7 @@ class RR < BinData::Record
   uint16 :rr_class
   uint32 :ttl
   uint16 :resp_len
-  uint32 :addr
+  string :response, length: lambda { p resp_len.to_s.to_i.to_s(2).rjust(16, "0"); resp_len.to_s.to_i.to_s(2).rjust(16, "0")[0..1] == "11" ? 0 : 4 }
 end
 
 class DNSPacket < BinData::Record
@@ -52,37 +57,43 @@ def resolve(name)
     s.send(q.to_binary_s, 0)
     p "Querying #{t} for #{name_to_s(name)}"
     STDOUT.flush
-    a_data = s.recvfrom(9999)
-    a = Net::DNS::Packet::parse(a_data)
+    data, sender_inet_addr = s.recvfrom(99999)
+    p data
+    a = DNSPacket.read(data)
     p a
 
-    if a.answer.size > 0
-      rr = a.answer.find { |rr| rr.type == "A" }
+    if a.answers.size > 0
+      rr = a.answers.find { |rr| rr.rr_type == A }
       if rr
-        t = rr.address
-        return t.to_s if rr.name == name_to_s(name) + "."
+        t = rr.response.unpack("C*").map(&:to_i).join(".")
+        return t if rr.name == name_to_s(name) + "."
       else
-        rr = a.answer.find { |rr| rr.type == "CNAME" }
+        rr = a.answers.find { |rr| rr.rr_type == CNAME }
         if rr
-          n = rr.cname
-          t = resolve(s_to_name(n))
+          n = name_to_s(rr.response)
+          t = resolve(n)
           return t
         else
           raise "oh no"
         end
       end
-    elsif a.additional.size > 0
-      t = a.additional.find { |rr| rr.type == "A" }.address
-    elsif a.authority.size > 0
-      rr = a.authority.find { |rr| rr.type == "NS" }
+    elsif a.additionals.size > 0
+      rr = a.additionals.find { |rr| rr.rr_type == A }
       if rr
-        n = rr.nsdname
-        t = resolve(s_to_name(n))
+        t = rr.response.unpack("C*").map(&:to_i).join(".")
       else
-        rr = a.authority.find { |rr| rr.type == "SOA" }
+        raise "oh no"
+      end
+    elsif a.authorities.size > 0
+      rr = a.authorities.find { |rr| rr.rr_type == NS }
+      if rr
+        n = rr.response
+        t = resolve(n)
+      else
+        rr = a.authorities.find { |rr| rr.rr_type == SOA }
         if rr
-          n = rr.mname
-          t = resolve(s_to_name(n))
+          n = name_to_s(rr.response.split("\x00")[0])
+          t = resolve(n)
         else
           raise "oh no"
         end
@@ -114,7 +125,7 @@ def s_to_name(name)
 end
 
 loop do
-  data, sender_inet_addr = socket.recvfrom(9999)
+  data, sender_inet_addr = socket.recvfrom(99999)
   type, port, domain, ip = sender_inet_addr
 
   query = DNSPacket.read(data)
@@ -138,7 +149,7 @@ loop do
   answer.ttl = 86400
   answer.resp_len = 4
   # Convert IP address to uint32.
-  answer.addr = addr.split(".").map(&:to_i).pack("C*").unpack("N")[0]
+  answer.response = addr.split(".").map(&:to_i).pack("C*")
   response.answers = [answer]
 
   socket.send(response.to_binary_s, 0, ip, port)
