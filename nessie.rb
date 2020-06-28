@@ -1,5 +1,44 @@
 require "socket"
 require "net/dns"
+require "bindata"
+
+class Question < BinData::Record
+  endian :big
+  stringz :name
+  uint16 :query_type
+  uint16 :query_class
+end
+
+class DNSQuery < BinData::Record
+  endian :big
+  uint16 :transaction_id
+  uint16 :flags
+  uint16 :num_questions
+  uint16 :answer_rrs
+  uint16 :authority_rrs
+  uint16 :additional_rrs
+
+  array :questions, type: :question, initial_length: :num_questions
+end
+
+class DNSResponse < BinData::Record
+  endian :big
+  uint16 :transaction_id
+  uint16 :flags
+  uint16 :num_questions
+  uint16 :answer_rrs
+  uint16 :authority_rrs
+  uint16 :additional_rrs
+
+  array :questions, type: :question, initial_length: :num_questions
+
+  stringz :response_name
+  uint16 :response_type
+  uint16 :response_class
+  uint32 :ttl
+  uint16 :resp_len
+  uint32 :addr
+end
 
 def resolve(name)
   t = "199.7.83.42" # l.root-servers.net, operated by ICANN
@@ -53,23 +92,38 @@ end
 socket = UDPSocket.new
 socket.bind("127.0.0.1", 5353)
 
+def name_to_s(name)
+  b = name.bytes
+  fields = []
+  while b.size > 0
+    l = b.shift
+    fields << b.shift(l)
+  end
+  fields.join(".")
+end
+
 loop do
   data, sender_inet_addr = socket.recvfrom(999)
   type, port, domain, ip = sender_inet_addr
 
-  query = Net::DNS::Packet::parse(data)
-
+  query = DNSQuery.read(data)
   p query
-  name = query.question[0].qName
+  name = name_to_s(query.questions[0].name)
 
   addr = resolve(name)
 
-  response = Net::DNS::Packet.new(name)
-  response.header.id = query.header.id
-  response.header.qr = 1
-  response.header.ra = 1
-  response.question = query.question
-  response.answer = [Net::DNS::RR.new(name: name, ttl: 86400, cls: "IN", type: "A", address: addr)]
+  response = DNSResponse.new()
+  response.transaction_id = query.transaction_id
+  response.response_type = 1
+  response.response_class = 1
+  response.ttl = 86400
+  response.resp_len = 4
+  response.num_questions = 1
+  response.answer_rrs = 1
+  response.questions = query.questions
+  response.response_name = query.questions[0].name
+  # Convert IP address to uint32.
+  response.addr = addr.split(".").map(&:to_i).pack("C*").unpack("N")[0]
 
-  socket.send(response.data, 0, ip, port)
+  socket.send(response.to_binary_s, 0, ip, port)
 end
